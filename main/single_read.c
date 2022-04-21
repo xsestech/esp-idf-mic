@@ -86,6 +86,10 @@ static const char *TAG = "ADC SINGLE";
 
 static esp_adc_cal_characteristics_t adc1_chars;
 
+int sock;
+
+
+
 static bool adc_calibration_init(void)
 {
     esp_err_t ret;
@@ -106,14 +110,12 @@ static bool adc_calibration_init(void)
     return cali_enable;
 }
 
-static void tcp_client_task(void *pvParameters)
+void tcp_tcp_create_socket()
 {
-    char rx_buffer[128];
     char host_ip[] = HOST_IP_ADDR;
     int addr_family = 0;
     int ip_protocol = 0;
 
-    while (1) {
 #if defined(CONFIG_EXAMPLE_IPV4)
         struct sockaddr_in dest_addr;
         dest_addr.sin_addr.s_addr = inet_addr(host_ip);
@@ -133,52 +135,37 @@ static void tcp_client_task(void *pvParameters)
         struct sockaddr_storage dest_addr = { 0 };
         ESP_ERROR_CHECK(get_addr_from_stdin(PORT, SOCK_STREAM, &ip_protocol, &addr_family, &dest_addr));
 #endif
-        int sock =  socket(addr_family, SOCK_STREAM, ip_protocol);
+        sock =  socket(addr_family, SOCK_STREAM, ip_protocol);
         if (sock < 0) {
             ESP_LOGE(TAG, "Unable to create socket: errno %d", errno);
-            break;
+            return;
         }
         ESP_LOGI(TAG, "Socket created, connecting to %s:%d", host_ip, PORT);
 
         int err = connect(sock, (struct sockaddr *)&dest_addr, sizeof(struct sockaddr_in6));
         if (err != 0) {
             ESP_LOGE(TAG, "Socket unable to connect: errno %d", errno);
-            break;
+            return;
         }
         ESP_LOGI(TAG, "Successfully connected");
 
-        while (1) {
-            int err = send(sock, payload, strlen(payload), 0);
-            if (err < 0) {
-                ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
-                break;
-            }
+}
 
-            int len = recv(sock, rx_buffer, sizeof(rx_buffer) - 1, 0);
-            // Error occurred during receiving
-            if (len < 0) {
-                ESP_LOGE(TAG, "recv failed: errno %d", errno);
-                break;
-            }
-            // Data received
-            else {
-                rx_buffer[len] = 0; // Null-terminate whatever we received and treat like a string
-                ESP_LOGI(TAG, "Received %d bytes from %s:", len, host_ip);
-                ESP_LOGI(TAG, "%s", rx_buffer);
-            }
+void restart_sock(){
+    ESP_LOGE(TAG, "Shutting down socket and restarting...");
+    shutdown(sock, 0);
+    close(sock);
+    tcp_tcp_create_socket();
+}
 
-            vTaskDelay(2000 / portTICK_PERIOD_MS);
-        }
-
-        if (sock != -1) {
-            ESP_LOGE(TAG, "Shutting down socket and restarting...");
-            shutdown(sock, 0);
-            close(sock);
-        }
+static void send_data_tcp_task(void *pvParameters){
+    int err = send(sock, pvParameters, sizeof(*pvParameters), 0);
+    if (err < 0) {
+        ESP_LOGE(TAG, "Error occurred during sending: errno %d", errno);
+        return;
     }
     vTaskDelete(NULL);
 }
-
 
 static void event_handler(void* arg, esp_event_base_t event_base,
                                 int32_t event_id, void* event_data)
@@ -280,20 +267,25 @@ void app_main(void)
 
     uint32_t voltage = 0;
     bool cali_enable = adc_calibration_init();
-
+    tcp_tcp_create_socket();
     //ADC1 config
     ESP_ERROR_CHECK(adc1_config_width(ADC_WIDTH_BIT_DEFAULT));
     ESP_ERROR_CHECK(adc1_config_channel_atten(ADC1_EXAMPLE_CHAN0, ADC_EXAMPLE_ATTEN));
-    xTaskCreate(tcp_client_task, "tcp_client", 4096, NULL, 5, NULL);
+    
 
     while (0) {
+        if (sock != -1) {
+            restart_sock();
+        }
         adc_raw[0][0] &= 0x0FFFF;
         adc_raw[0][0] = adc1_get_raw(ADC1_EXAMPLE_CHAN0);
-        //ESP_LOGI(TAG_CH[0][0], "raw  data: %d", adc_raw[0][0]);
+        voltage = adc_raw[0][0];
+        ESP_LOGI(TAG_CH[0][0], "raw  data: %d", adc_raw[0][0]);
         if (cali_enable) {
             voltage = esp_adc_cal_raw_to_voltage(adc_raw[0][0], &adc1_chars);
-            //ESP_LOGI(TAG_CH[0][0], "cali data: %d mV", voltage);
+            ESP_LOGI(TAG_CH[0][0], "cali data: %d mV", voltage);
         }
+        xTaskCreate(send_data_tcp_task, "send_tcp", 4096, (void *) voltage, 5, NULL);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
